@@ -3,6 +3,9 @@
 #include <iostream>
 #include <sstream>
 
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <vector>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -206,12 +209,14 @@ class VoronoiDiagram {
 
     void compute() {
 
+        cells.resize(points.size());
+
         Polygon square;
         square.vertices.push_back(Vector(0, 0));
         square.vertices.push_back(Vector(1, 0));
         square.vertices.push_back(Vector(1, 1));
         square.vertices.push_back(Vector(0, 1));
-        
+
         // TODO Lab 1 (Voronoi)
         // For all sites Pi (in parallel) :
         //      Start with a unit square
@@ -222,26 +227,17 @@ class VoronoiDiagram {
         for (size_t i=0; i<points.size(); i++) {
 
             Polygon cell = square;
+            double w0 = weights.empty() ? 0.0 : weights[i];
 
             for (size_t j=0; j<points.size(); j++) {
                 if (j==i) {
                     continue;
                 }
-                cell = clip_by_bisector(cell, points[i], points[j], 0.12, 0.12);
+                double wj = weights.empty() ? 0.0 : weights[j];
+                cell = clip_by_bisector(cell, points[i], points[j], w0, wj);
             }
-            cells.push_back(cell);
+            cells[i] = cell;
         }
-        // int i = 4;
-        // Polygon cell = square;
-        
-        // for (size_t j=0; j<points.size(); j++) {
-        //     if (j==i) {
-        //         continue;
-        //     }
-            
-        //     cell = clip_by_bisector(cell, points[i], points[j], 0, 0);
-        // }
-        // cells.push_back(cell);
     }
 
 
@@ -329,14 +325,15 @@ static lbfgsfloatval_t evaluate(
     // Lab 3 (fluid) : adapt these functions to support partial optimal transport (now "n" has been increased by 1 to account for the air variable)
     
     lbfgsfloatval_t fx = 0.0;
-    
+
     for (size_t i=0; i<(size_t) n; i++) {
-        
+
         std::vector<Vector>& polygon = ot->vor.cells[i].vertices;
         size_t m = polygon.size();
-        
-        // fx += \int_T_j ||x - y_i||^2 dx
-        for (size_t j=1; j<m-1; j++) {
+
+        // Compute the integral term \int_T_i ||x - y_i||^2 dx.
+        double integral = 0.0;
+        for (size_t j=1; j + 1 < m; j++) {
             // triangle is (0, j, j+1)
             std::vector<size_t> c = {0, j, j+1};
             double abs_T = abs_cross_prod(polygon[c[1]] - polygon[c[0]],
@@ -349,10 +346,9 @@ static lbfgsfloatval_t evaluate(
                                 polygon[c[l]] - ot->vor.points[i]);
                 }
             }
-            fx += abs_T * triangle_integral / 6;
+            integral += abs_T * triangle_integral / 6.0;
         }
 
-        // fx += w_i (lambda_i - A_i)
         double Ai = 0;
 
         for (size_t j=0; j<m; j++) {
@@ -360,14 +356,13 @@ static lbfgsfloatval_t evaluate(
             Ai += (polygon[j][0] * polygon[next_j][1]
                  - polygon[j][1] * polygon[next_j][0]);
         }
-        Ai = std::abs(Ai) /2;
-        
-        fx += ot->vor.weights[i] * ((1.0/n) - Ai);
-        std::cout << "fx = " << fx << std::endl;
+        Ai = std::abs(Ai) * 0.5;
 
-        // g_i = lambda_i - A_i
-        g[i] = - (1.0/n) + Ai;
-        std::cout << "g[" << i << "] = " << g[i] << std::endl;
+        double target = 1.0 / n;
+
+        // Minimized objective: -g_dual, with gradient area - target.
+        fx += x[i] * (Ai - target) - integral;
+        g[i] = Ai - target;
     }
 
     return fx;
@@ -397,11 +392,10 @@ void OptimalTransport::optimize() {
     lbfgs_parameter_init(&param);
     
     // run the LBFGS optimizer
-    std::cout << weights.size() << std::endl;
 
-    int ret = lbfgs(weights.size(), &weights[0], &fx, evaluate, progress, (void*)this, &param);
-
-    std::cout << "ret: " << ret << std::endl;
+    if (int ret = lbfgs(weights.size(), &weights[0], &fx, evaluate, progress, (void*)this, &param)) {
+        std::cout << "failed lbfgs, return code: " << ret << std::endl;
+    }
     
     // copy the result back to the voronoi structure
     vor.weights = weights;
@@ -478,7 +472,7 @@ int main() {
     
     VoronoiDiagram D;
 
-    for (size_t i=0; i<10; i++) {
+    for (size_t i=0; i<100; i++) {
         double x = rand() / (double) RAND_MAX;
         double y = rand() / (double) RAND_MAX;
         D.points.push_back(Vector(x, y));
@@ -495,10 +489,11 @@ int main() {
     ot.vor = D;
 
     ot.optimize();
+    //D.compute();
 
     std::vector<Polygon> s = ot.vor.cells;
     
     save_frame(s, "toto");
-    save_svg(s, "toto.svg");
+    save_svg(s, "toto.svg", &ot.vor.points);
     return 0;
 }
